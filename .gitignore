@@ -2,12 +2,14 @@
 .env
 .env.*
 !.env.example
+.venv/
 
 # Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.pyc
 *.so
 *.egg
 *.egg-info/
@@ -50,3 +52,7 @@ logs/
 # Flask session / instance
 instance/
 flask_session/
+
+# Database
+provenance.db
+*.db
