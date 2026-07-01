@@ -4,6 +4,10 @@ A Flask backend system for AI content attribution on creative sharing platforms.
 
 ---
 
+[Demo Link](https://youtu.be/z6sDfi45YeU)
+
+---
+
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
