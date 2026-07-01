@@ -24,7 +24,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
 
-from signals import get_llm_score          # Signal 1 only for now
+from signals import get_llm_score, get_stylometric_score, get_burstiness_score
 from scoring import compute_confidence, generate_label
 from database import (
     init_db, insert_submission, get_submission,
@@ -95,12 +95,11 @@ def submit():
     # Signal 1: LLM — semantic holistic assessment
     llm_score, llm_reasoning = get_llm_score(text, content_type)
 
-    # Signals 2 & 3: placeholder until Milestone 4
-    # Replace these four lines in Milestone 4 with the real signal functions
-    stylometric_score   = 0.5
-    stylometric_metrics = {"note": "placeholder — added in Milestone 4"}
-    burstiness_score    = 0.5
-    burstiness_metrics  = {"note": "placeholder — added in Milestone 4"}
+    # Signal 2: Stylometric heuristics (global statistical properties)
+    stylometric_score, stylometric_metrics = get_stylometric_score(text)
+
+    # Signal 3: Burstiness analysis (local sequential variation — stretch: ensemble)
+    burstiness_score, burstiness_metrics = get_burstiness_score(text)
 
     # Step 3: Compute ensemble confidence + attribution
     confidence, attribution = compute_confidence(

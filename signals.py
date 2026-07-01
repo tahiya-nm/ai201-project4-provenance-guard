@@ -115,3 +115,210 @@ Where ai_probability means:
         return 0.5, f"LLM parse error: {str(e)}"
     except Exception as e:
         return 0.5, f"LLM signal failed: {str(e)}"
+    
+
+# ─── Signal 2: Stylometric Heuristics ─────────────────────────────────────────
+
+def get_stylometric_score(text: str) -> tuple[float, dict]:
+    """
+    SIGNAL 2 — Global statistical properties of the text.
+
+    DISTINCT FROM SIGNAL 3: This measures the overall *distribution shape*
+    of writing features across the entire text — not sequential patterns.
+
+    Sub-features (each scored 0.0–1.0 where 1.0 = more AI-like):
+      1. Sentence length uniformity — low variance across whole text → AI
+      2. Type-token ratio (TTR)     — lower vocabulary diversity → AI
+      3. Filler word density        — fewer informal words → AI
+      4. Average sentence length    — longer average sentences → AI
+
+    Steps:
+      1. Split into sentences and word tokens
+      2. Guard against texts too short for meaningful statistics
+      3. Compute each of the 4 sub-features independently
+      4. Combine via weighted sum into a single score
+
+    Args:
+        text: Content string to analyze
+
+    Returns:
+        (ai_score: float 0.0–1.0, metrics: dict with sub-scores and raw values)
+
+    Time:  O(n) where n = number of tokens
+    Space: O(n) for sentence and word lists
+    """
+    sentences   = _split_sentences(text)
+    words       = text.lower().split()
+    total_words = len(words)
+
+    # Guard: too little text for meaningful statistics
+    if total_words < 10 or len(sentences) < 2:
+        return 0.5, {"error": "Text too short for reliable stylometric analysis"}
+
+    # ── Sub-feature 1: Sentence Length Uniformity ─────────────────────────────
+    # AI text has consistent sentence lengths (low std dev).
+    # Human text mixes short punchy sentences with longer elaborations.
+    sent_lengths = [len(s.split()) for s in sentences]
+    mean_len     = sum(sent_lengths) / len(sent_lengths)
+    variance     = sum((l - mean_len) ** 2 for l in sent_lengths) / len(sent_lengths)
+    std_dev      = math.sqrt(variance)
+    # Map: std_dev=0 → uniformity_score=1.0 (AI); std_dev≥12 → 0.0 (human)
+    uniformity_score = max(0.0, min(1.0, 1.0 - std_dev / 12.0))
+
+    # ── Sub-feature 2: Type-Token Ratio (vocabulary diversity) ────────────────
+    # TTR = unique_words / total_words.
+    # Very high TTR (> 0.85) is typically human; AI produces consistent moderate TTR.
+    clean_words = re.sub(r"[^a-zA-Z\s]", "", text).lower().split()
+    ttr = len(set(clean_words)) / len(clean_words) if clean_words else 0.5
+    # Map: ttr=0.40 → 0.75 AI score; ttr=0.85 → 0.25 AI score (linear interpolation)
+    ttr_ai_score = max(0.0, min(1.0, 0.75 - (ttr - 0.40) * (0.50 / 0.45)))
+
+    # ── Sub-feature 3: Filler / Informal Word Density ─────────────────────────
+    # Humans use informal filler words naturally; AI avoids them in formal writing.
+    filler_words = {
+        "um", "uh", "like", "basically", "literally", "actually", "honestly",
+        "totally", "really", "just", "kind", "sort", "okay", "ok", "yeah",
+        "nah", "anyway", "right", "well", "so", "look", "mean"
+    }
+    filler_count = sum(1 for w in words if w in filler_words)
+    filler_ratio = filler_count / total_words if total_words > 0 else 0.0
+    # High filler ratio → human → low AI score; saturates at ratio=0.10
+    filler_ai_score = max(0.0, min(1.0, 1.0 - filler_ratio * 10.0))
+
+    # ── Sub-feature 4: Average Sentence Length ────────────────────────────────
+    # AI tends toward longer, denser sentences. Very short avg (< 8 words) → human.
+    if mean_len >= 25:
+        length_ai_score = 0.75   # very long sentences → strong AI signal
+    elif mean_len >= 18:
+        length_ai_score = 0.55   # moderately long
+    elif mean_len >= 10:
+        length_ai_score = 0.40   # typical middle range
+    else:
+        length_ai_score = 0.25   # short sentences → human-like
+
+    # ── Weighted Combination ──────────────────────────────────────────────────
+    stylometric_score = (
+        uniformity_score  * 0.35 +
+        ttr_ai_score      * 0.25 +
+        filler_ai_score   * 0.20 +
+        length_ai_score   * 0.20
+    )
+    stylometric_score = round(max(0.0, min(1.0, stylometric_score)), 3)
+
+    metrics = {
+        "sentence_count":       len(sentences),
+        "mean_sentence_length": round(mean_len, 2),
+        "sentence_length_std":  round(std_dev, 2),
+        "type_token_ratio":     round(ttr, 3),
+        "filler_word_ratio":    round(filler_ratio, 3),
+        "sub_scores": {
+            "uniformity": round(uniformity_score, 3),
+            "ttr":        round(ttr_ai_score, 3),
+            "filler":     round(filler_ai_score, 3),
+            "avg_length": round(length_ai_score, 3),
+        }
+    }
+
+    return stylometric_score, metrics
+
+
+# ─── Signal 3: Burstiness Analysis (Stretch: Ensemble) ────────────────────────
+
+def get_burstiness_score(text: str) -> tuple[float, dict]:
+    """
+    SIGNAL 3 — Local sequential variation patterns.
+
+    DISTINCT FROM SIGNAL 2: Signal 2 measures GLOBAL distributions (overall shape).
+    This signal measures LOCAL sequential changes — how writing rhythm varies from
+    sentence to sentence. Human writing is "bursty": it alternates between short
+    punchy sentences and long elaborative ones. AI maintains consistent rhythm.
+
+    Sub-features (each scored 0.0–1.0 where 1.0 = more AI-like / low burstiness):
+      1. Coefficient of variation (CV) — std/mean of sentence lengths
+         Low CV = uniform rhythm = AI-like
+      2. Outlier sentence ratio — very short (< 4 words) or long (> 35 words) sentences
+         Low outlier ratio = AI-like (no dramatic extremes)
+      3. Max-to-min length ratio — how extreme the overall length range is
+         Low ratio = AI-like (narrow range)
+      4. Average sequential difference — mean of |length[i] - length[i-1]|
+         Low avg diff = smooth non-bursty rhythm = AI-like
+
+    Steps:
+      1. Split into sentences; guard against < 3 sentences
+      2. Compute each of the 4 sub-features
+      3. Combine via weighted sum into a single score
+
+    Args:
+        text: Content string to analyze
+
+    Returns:
+        (ai_score: float 0.0–1.0, metrics: dict with sub-scores and raw values)
+
+    Time:  O(n) where n = sentence count
+    Space: O(n) for sentence length list
+    """
+    sentences = _split_sentences(text)
+
+    # Guard: need at least 3 sentences for meaningful sequential analysis
+    if len(sentences) < 3:
+        return 0.5, {"error": "Need at least 3 sentences for burstiness analysis"}
+
+    sent_lengths = [len(s.split()) for s in sentences]
+    n        = len(sent_lengths)
+    mean_len = sum(sent_lengths) / n
+    std_dev  = math.sqrt(sum((l - mean_len) ** 2 for l in sent_lengths) / n)
+
+    # ── Sub-feature 1: Coefficient of Variation (CV) ─────────────────────────
+    # CV = std / mean. Low CV means lengths cluster tightly around the mean (AI).
+    # Human writing CV is typically > 0.5; AI writing CV is typically < 0.3.
+    cv = std_dev / mean_len if mean_len > 0 else 0.0
+    # Map: cv=0.0 → cv_ai_score=1.0; cv≥0.80 → 0.0
+    cv_ai_score = max(0.0, min(1.0, 1.0 - cv / 0.80))
+
+    # ── Sub-feature 2: Outlier Sentence Ratio ────────────────────────────────
+    # Humans mix dramatic extremes (very short + very long sentences together).
+    outliers      = sum(1 for l in sent_lengths if l < 4 or l > 35)
+    outlier_ratio = outliers / n
+    # High outlier ratio → human-like; > 33% outliers → ai_score approaches 0.0
+    outlier_ai_score = max(0.0, min(1.0, 1.0 - outlier_ratio * 3.0))
+
+    # ── Sub-feature 3: Max-to-Min Sentence Length Ratio ──────────────────────
+    # Wide range (max/min > 8) = bursty = human-like. Narrow range = AI-like.
+    max_len     = max(sent_lengths)
+    min_len     = max(min(sent_lengths), 1)    # avoid division by zero
+    range_ratio = max_len / min_len
+    # Map: range_ratio=1 → ai_score=1.0; range_ratio≥10 → 0.0
+    range_ai_score = max(0.0, min(1.0, 1.0 - (range_ratio - 1.0) / 9.0))
+
+    # ── Sub-feature 4: Average Sequential Difference ─────────────────────────
+    # Measures how much each sentence length changes from the previous one.
+    # High avg diff = bursty alternation = human-like.
+    diffs    = [abs(sent_lengths[i] - sent_lengths[i - 1]) for i in range(1, n)]
+    avg_diff = sum(diffs) / len(diffs) if diffs else 0.0
+    # Map: avg_diff=0 → ai_score=1.0; avg_diff≥12 → 0.0
+    seq_ai_score = max(0.0, min(1.0, 1.0 - avg_diff / 12.0))
+
+    # ── Weighted Combination ──────────────────────────────────────────────────
+    burstiness_score = (
+        cv_ai_score      * 0.30 +
+        outlier_ai_score * 0.25 +
+        range_ai_score   * 0.25 +
+        seq_ai_score     * 0.20
+    )
+    burstiness_score = round(max(0.0, min(1.0, burstiness_score)), 3)
+
+    metrics = {
+        "sentence_count":             n,
+        "coefficient_of_variation":   round(cv, 3),
+        "outlier_sentence_ratio":     round(outlier_ratio, 3),
+        "max_min_length_ratio":       round(range_ratio, 2),
+        "avg_sequential_length_diff": round(avg_diff, 2),
+        "sub_scores": {
+            "cv":       round(cv_ai_score, 3),
+            "outliers": round(outlier_ai_score, 3),
+            "range":    round(range_ai_score, 3),
+            "seq_diff": round(seq_ai_score, 3),
+        }
+    }
+
+    return burstiness_score, metrics
